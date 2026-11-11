@@ -1,1 +1,64 @@
+name: Build APK
 
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # Se voce subiu um .zip do projeto na raiz do repo, descompacta; senao usa o repo como esta.
+      - name: Localizar projeto (descompacta zip se existir)
+        id: proj
+        run: |
+          set -e
+          if [ ! -f gradlew ]; then
+            Z=$(ls -1 *.zip 2>/dev/null | head -1 || true)
+            if [ -n "$Z" ]; then
+              echo "Descompactando $Z"
+              mkdir -p _proj && unzip -q -o "$Z" -d _proj
+            fi
+            G=$(find . -name gradlew -not -path './.git/*' | head -1)
+            [ -n "$G" ] || { echo "gradlew nao encontrado"; exit 1; }
+            DIR=$(dirname "$G")
+          else
+            DIR=.
+          fi
+          echo "Projeto em: $DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Instalar NDK e CMake
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "ndk;26.1.10909125" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Cache do FFmpeg compilado
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.proj.outputs.dir }}/ffmpeg-build
+          key: ffmpeg-7.1-arm64-${{ hashFiles(format('{0}/scripts/build-ffmpeg.sh', steps.proj.outputs.dir)) }}
+
+      - name: Compilar
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: |
+          chmod +x gradlew scripts/build-ffmpeg.sh
+          # remove opcoes especificas do Termux, caso estejam ativas no gradle.properties
+          sed -i '/^android.aapt2FromMavenOverride/d;/^untruncNdkPath/d' gradle.properties
+          ./gradlew assembleDebug --no-daemon --stacktrace -PuntruncNdkVersion=26.1.10909125
+
+      - name: Enviar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: untrunc-debug-apk
+          path: ${{ steps.proj.outputs.dir }}/app/build/outputs/apk/debug/*.apk
